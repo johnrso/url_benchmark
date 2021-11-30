@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from torch.fft import fftn
 
 import utils
 
@@ -15,7 +16,7 @@ class Encoder(nn.Module):
         assert len(obs_shape) == 3
         self.repr_dim = 32 * 35 * 35
 
-        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0] * 2, 32, 3, stride=2),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
@@ -25,7 +26,10 @@ class Encoder(nn.Module):
 
     def forward(self, obs):
         obs = obs / 255.0 - 0.5
+        obs = fftn(obs, dim=(1,2,3))
+        obs = torch.cat((obs.real, obs.imag), dim=1)
         h = self.convnet(obs)
+
         h = h.view(h.shape[0], -1)
         return h
 
