@@ -60,6 +60,7 @@ class Workspace:
 
         # initialize from pretrained
         if cfg.snapshot_ts > 0:
+            print("loading snapshot")
             pretrained_agent = self.load_snapshot()['agent']
             self.agent.init_from(pretrained_agent)
 
