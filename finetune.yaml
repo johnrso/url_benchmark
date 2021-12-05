@@ -17,8 +17,8 @@ num_seed_frames: 4000
 eval_every_frames: 10000
 num_eval_episodes: 10
 # pretrained
-snapshot_ts: 0
-snapshot_base_dir: ./pretrained_models
+snapshot_ts: 1000000
+snapshot_base_dir: /home/joso/url_benchmark/rerun_snapshot/
 # replay buffer
 replay_buffer_size: 1000000
 replay_buffer_num_workers: 4

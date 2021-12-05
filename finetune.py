@@ -227,6 +227,8 @@ class Workspace:
         def try_load(seed):
             snapshot = snapshot_dir / str(
                 seed) / f'snapshot_{self.cfg.snapshot_ts}.pt'
+
+            print(snapshot)
             if not snapshot.exists():
                 return None
             with snapshot.open('rb') as f:
