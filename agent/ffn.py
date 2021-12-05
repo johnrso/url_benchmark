@@ -56,52 +56,20 @@ class Encoder(nn.Module):
 
         assert len(obs_shape) == 3
         #self.repr_dim = 32 * 35 * 35
-        self.repr_dim = 21168
+        self.repr_dim = 39200
 
-        #self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
-        #                             nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-        #                             nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-        #                             nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-        #                             nn.ReLU())
-        self.convnet = nn.Sequential(
-        nn.Conv2d(
-            256,
-            32,
-            kernel_size=1,
-            padding=0),
-        nn.ReLU(),
-        nn.BatchNorm2d(32),
-
-        nn.Conv2d(
-            32,
-            32,
-            kernel_size=1,
-            padding=0),
-        nn.ReLU(),
-        nn.BatchNorm2d(32),
-
-        nn.Conv2d(
-            32,
-            32,
-            kernel_size=1,
-            padding=0),
-        nn.ReLU(),
-        nn.BatchNorm2d(32),
-
-        nn.Conv2d(
-            32,
-            3,
-            kernel_size=1,
-            padding=0),
-        nn.ReLU(),
-
-        )
+        self.convnet = nn.Sequential(nn.Conv2d(64, 32, 3, stride=2),
+                                     nn.BatchNorm2d(32),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+                                     nn.ReLU())
 
         self.apply(utils.weight_init)
 
     def forward(self, obs):
         obs = obs / 255.0 - 0.5
-        obs = GaussianFourierFeatureTransform(9, 128, 10)(obs)
+        obs = GaussianFourierFeatureTransform(9, 32, 10)(obs)
         h = self.convnet(obs)
         h = h.reshape(h.shape[0], -1)
         return h
