@@ -8,32 +8,102 @@ from torch.fft import fftn
 
 import utils
 
+class GaussianFourierFeatureTransform(torch.nn.Module):
+    """
+    An implementation of Gaussian Fourier feature mapping.
+
+    "Fourier Features Let Networks Learn High Frequency Functions in Low Dimensional Domains":
+       https://arxiv.org/abs/2006.10739
+       https://people.eecs.berkeley.edu/~bmild/fourfeat/index.html
+
+    Given an input of size [batches, num_input_channels, width, height],
+     returns a tensor of size [batches, mapping_size*2, width, height].
+    """
+
+    def __init__(self, num_input_channels, mapping_size=256, scale=10):
+        super().__init__()
+
+        self._num_input_channels = num_input_channels
+        self._mapping_size = mapping_size
+        self._B = torch.randn((num_input_channels, mapping_size)) * scale
+
+    def forward(self, x):
+        assert x.dim() == 4, 'Expected 4D input (got {}D input)'.format(x.dim())
+
+        batches, channels, width, height = x.shape
+
+        assert channels == self._num_input_channels,\
+            "Expected input to have {} channels (got {} channels)".format(self._num_input_channels, channels)
+
+
+        # Make shape compatible for matmul with _B.
+        # From [B, C, W, H] to [(B*W*H), C].
+        x = x.permute(0, 2, 3, 1).reshape(batches * width * height, channels)
+
+        x = x @ self._B.to(x.device)
+
+        # From [(B*W*H), C] to [B, W, H, C]
+        x = x.view(batches, width, height, self._mapping_size)
+        # From [B, W, H, C] to [B, C, W, H]
+        x = x.permute(0, 3, 1, 2)
+
+        x = 2 * np.pi * x
+        return torch.cat([torch.sin(x), torch.cos(x)], dim=1)
 
 class Encoder(nn.Module):
     def __init__(self, obs_shape):
         super().__init__()
 
         assert len(obs_shape) == 3
-        self.repr_dim = 32 * 35 * 35
+        #self.repr_dim = 32 * 35 * 35
+        self.repr_dim = 21168
 
-        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0] * 2, 32, 3, stride=2),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
-                                     nn.ReLU())
+        #self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+        #                             nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+        #                             nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+        #                             nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
+        #                             nn.ReLU())
+        self.convnet = nn.Sequential(
+        nn.Conv2d(
+            256,
+            32,
+            kernel_size=1,
+            padding=0),
+        nn.ReLU(),
+        nn.BatchNorm2d(32),
+
+        nn.Conv2d(
+            32,
+            32,
+            kernel_size=1,
+            padding=0),
+        nn.ReLU(),
+        nn.BatchNorm2d(32),
+
+        nn.Conv2d(
+            32,
+            32,
+            kernel_size=1,
+            padding=0),
+        nn.ReLU(),
+        nn.BatchNorm2d(32),
+
+        nn.Conv2d(
+            32,
+            3,
+            kernel_size=1,
+            padding=0),
+        nn.ReLU(),
+
+        )
 
         self.apply(utils.weight_init)
 
     def forward(self, obs):
-        print(obs.shape)
         obs = obs / 255.0 - 0.5
-        obs = fftn(obs, dim=(1,2,3))
-        obs = torch.cat((obs.real, obs.imag), dim=1)
+        obs = GaussianFourierFeatureTransform(9, 128, 10)(obs)
         h = self.convnet(obs)
-        print(obs.shape)
-
-        h = h.view(h.shape[0], -1)
-        print(h.shape)
+        h = h.reshape(h.shape[0], -1)
         return h
 
 
@@ -123,7 +193,7 @@ class Critic(nn.Module):
         return q1, q2
 
 
-class FFTAgent:
+class FFNAgent:
     def __init__(self, name, reward_free, obs_type, obs_shape, action_shape,
                  device, lr, feature_dim, hidden_dim, critic_target_tau,
                  num_expl_steps, update_every_steps, stddev_schedule, nstep,
