@@ -120,7 +120,7 @@ class Critic(nn.Module):
         return q1, q2
 
 
-class DDPGAgent:
+class FFTAgent:
     def __init__(self, name, reward_free, obs_type, obs_shape, action_shape,
                  device, lr, feature_dim, hidden_dim, critic_target_tau,
                  num_expl_steps, update_every_steps, stddev_schedule, nstep,
