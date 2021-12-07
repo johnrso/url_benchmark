@@ -4,6 +4,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from collections import OrderedDict
+from torch.fft import fftn
 
 import utils
 
@@ -15,7 +16,7 @@ class Encoder(nn.Module):
         assert len(obs_shape) == 3
         self.repr_dim = 32 * 35 * 35
 
-        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0], 32, 3, stride=2),
+        self.convnet = nn.Sequential(nn.Conv2d(obs_shape[0] * 2, 32, 3, stride=2),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
                                      nn.ReLU(), nn.Conv2d(32, 32, 3, stride=1),
@@ -24,10 +25,15 @@ class Encoder(nn.Module):
         self.apply(utils.weight_init)
 
     def forward(self, obs):
+        print(obs.shape)
         obs = obs / 255.0 - 0.5
+        obs = fftn(obs, dim=(1,2,3))
         obs = torch.cat((obs.real, obs.imag), dim=1)
         h = self.convnet(obs)
+        print(obs.shape)
+
         h = h.view(h.shape[0], -1)
+        print(h.shape)
         return h
 
 
@@ -117,7 +123,7 @@ class Critic(nn.Module):
         return q1, q2
 
 
-class DDPGAgent:
+class FFTAgent:
     def __init__(self, name, reward_free, obs_type, obs_shape, action_shape,
                  device, lr, feature_dim, hidden_dim, critic_target_tau,
                  num_expl_steps, update_every_steps, stddev_schedule, nstep,
