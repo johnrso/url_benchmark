@@ -10,6 +10,36 @@ import utils
 
 from agent.ddpg import DDPGAgent
 
+
+@jit.script
+def sinkhorn_knopp(Q):
+    Q -= Q.max()
+    Q = torch.exp(Q).T
+    Q /= Q.sum()
+
+    r = torch.ones(Q.shape[0], device=Q.device) / Q.shape[0]
+    c = torch.ones(Q.shape[1], device=Q.device) / Q.shape[1]
+    for it in range(3):
+        u = Q.sum(dim=1)
+        u = r / u
+        Q *= u.unsqueeze(dim=1)
+        Q *= (c / Q.sum(dim=0)).unsqueeze(dim=0)
+    Q = Q / Q.sum(dim=0, keepdim=True)
+    return Q.T
+
+
+class Projector(nn.Module):
+    def __init__(self, pred_dim, proj_dim):
+        super().__init__()
+
+        self.trunk = nn.Sequential(nn.Linear(pred_dim, proj_dim), nn.ReLU(),
+                                   nn.Linear(proj_dim, pred_dim))
+
+        self.apply(utils.weight_init)
+
+    def forward(self, x):
+        return self.trunk(x)
+
 class ICM(nn.Module):
     def __init__(self, obs_dim, action_dim, hidden_dim):
         super().__init__()
@@ -44,38 +74,10 @@ class ICM(nn.Module):
 
         return forward_error, backward_error
 
-@jit.script
-def sinkhorn_knopp(Q):
-    Q -= Q.max()
-    Q = torch.exp(Q).T
-    Q /= Q.sum()
 
-    r = torch.ones(Q.shape[0], device=Q.device) / Q.shape[0]
-    c = torch.ones(Q.shape[1], device=Q.device) / Q.shape[1]
-    for it in range(3):
-        u = Q.sum(dim=1)
-        u = r / u
-        Q *= u.unsqueeze(dim=1)
-        Q *= (c / Q.sum(dim=0)).unsqueeze(dim=0)
-    Q = Q / Q.sum(dim=0, keepdim=True)
-    return Q.T
-
-
-class Projector(nn.Module):
-    def __init__(self, pred_dim, proj_dim):
-        super().__init__()
-
-        self.trunk = nn.Sequential(nn.Linear(pred_dim, proj_dim), nn.ReLU(),
-                                   nn.Linear(proj_dim, pred_dim))
-
-        self.apply(utils.weight_init)
-
-    def forward(self, x):
-        return self.trunk(x)
-
-class ProtoAgent(DDPGAgent):
+class ProtoICMAgent(DDPGAgent):
     def __init__(self, pred_dim, proj_dim, queue_size, num_protos,
-                 tau, encoder_target_tau, topk, update_encoder, **kwargs):
+                 tau, encoder_target_tau, topk, update_encoder, icm_scale, **kwargs):
         super().__init__(**kwargs)
         self.tau = tau
         self.encoder_target_tau = encoder_target_tau
@@ -85,10 +87,6 @@ class ProtoAgent(DDPGAgent):
 
         # models
         self.encoder_target = deepcopy(self.encoder)
-
-        self.icm = ICM(self.obs_dim, self.action_dim, self.hidden_dim).to(self.device)
-        self.icm.apply(utils.weight_init)
-        self.icm_opt = torch.optim.Adam(self.icm.parameters(), lr=self.lr)
 
         self.predictor = nn.Linear(self.obs_dim, pred_dim).to(self.device)
         self.predictor.apply(utils.weight_init)
@@ -112,10 +110,20 @@ class ProtoAgent(DDPGAgent):
             self.projector.parameters(), self.protos.parameters()),
                                           lr=self.lr)
 
-        self.icm.train()
         self.predictor.train()
         self.projector.train()
         self.protos.train()
+
+        self.icm_scale = icm_scale
+
+        self.icm = ICM(self.obs_dim, self.action_dim,
+                       self.hidden_dim).to(self.device)
+
+        # optimizers
+        self.icm_optimizer = torch.optim.Adam(self.icm.parameters(),
+                                              lr=self.lr)
+
+        self.icm.train()
 
     def init_from(self, other):
         # copy parameters over
@@ -133,34 +141,34 @@ class ProtoAgent(DDPGAgent):
         self.protos.weight.data.copy_(C)
 
     def compute_intr_reward(self, obs, action, next_obs, step):
-        obs = self.encoder(obs)
-        next_obs = self.encoder(next_obs)
-        
+        self.normalize_protos()
+        # find a candidate for each prototype
+        with torch.no_grad():
+            z = self.encoder(next_obs)
+            z = self.predictor(z)
+            z = F.normalize(z, dim=1, p=2)
+            scores = self.protos(z).T
+            prob = F.softmax(scores, dim=1)
+            candidates = pyd.Categorical(prob).sample()
+
+        # enqueue candidates
+        ptr = self.queue_ptr
+        self.queue[ptr:ptr + self.num_protos] = z[candidates]
+        queue_ptr = (ptr + self.num_protos) % self.queue.shape[0]
+
+        # compute distances between the batch and the queue of candidates
+        z_to_q = torch.norm(z[:, None, :] - self.queue[None, :, :], dim=2, p=2)
+        all_dists, _ = torch.topk(z_to_q, self.topk, dim=1, largest=False)
+        dist = all_dists[:, -1:]
+        proto_reward = dist
+
         forward_error, _ = self.icm(obs, action, next_obs)
 
-        reward = forward_error
-        reward = torch.log(reward + 1.0)
-        return reward
+        icm_reward = forward_error * self.icm_scale
+        icm_reward = torch.log(icm_reward + 1.0)
 
-    def update_icm(self, obs, action, next_obs, step):
-        metrics = dict()
+        return proto_reward + icm_reward
 
-        obs = self.encoder(obs)
-        next_obs = self.encoder(next_obs)
-        
-        forward_error, backward_error = self.icm(obs, action, next_obs)
-
-        loss = forward_error.mean() + backward_error.mean()
-
-        self.icm_opt.zero_grad(set_to_none=True)
-        loss.backward()
-        self.icm_opt.step()
-
-        if self.use_tb or self.use_wandb:
-            metrics['icm_loss'] = loss.item()
-
-        return metrics
-    
     def update_proto(self, obs, next_obs, step):
         metrics = dict()
 
@@ -193,6 +201,23 @@ class ProtoAgent(DDPGAgent):
 
         return metrics
 
+    def update_icm(self, obs, action, next_obs, step):
+        metrics = dict()
+
+        forward_error, backward_error = self.icm(obs, action, next_obs)
+
+        loss = forward_error.mean() + backward_error.mean()
+
+        self.icm_optimizer.zero_grad(set_to_none=True)
+        loss.backward()
+        self.icm_optimizer.step()
+
+        if self.use_tb or self.use_wandb:
+            metrics['icm_loss'] = loss.item()
+
+        return metrics
+
+
     def update(self, replay_iter, step):
         metrics = dict()
 
@@ -210,13 +235,12 @@ class ProtoAgent(DDPGAgent):
 
         if self.reward_free:
             metrics.update(self.update_proto(obs, next_obs, step))
-            
-            # update icm
-            metrics.update(self.update_icm(obs, action, next_obs, step))
+            metrics.update(
+                self.update_icm(obs.detach(), action, next_obs.detach(), step))
 
             with torch.no_grad():
-                intr_reward = self.compute_intr_reward(obs, action, next_obs, step)
-
+                intr_reward = self.compute_intr_reward(obs, action, next_obs,
+                                                       step)
             if self.use_tb or self.use_wandb:
                 metrics['intr_reward'] = intr_reward.mean().item()
             reward = intr_reward
@@ -226,6 +250,7 @@ class ProtoAgent(DDPGAgent):
         if self.use_tb or self.use_wandb:
             metrics['extr_reward'] = extr_reward.mean().item()
             metrics['batch_reward'] = reward.mean().item()
+
 
         obs = self.encoder(obs)
         next_obs = self.encoder(next_obs)
@@ -237,7 +262,6 @@ class ProtoAgent(DDPGAgent):
         # update critic
         metrics.update(
             self.update_critic(obs, action, reward, discount, next_obs, step))
-
 
         # update actor
         metrics.update(self.update_actor(obs.detach(), step))
